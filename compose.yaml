@@ -7,10 +7,15 @@ services:
       - "8000:8000"
     environment:
       DATA_DIR: /data
+      INBOX_DIR: /inbox
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       PORT: "8000"
     volumes:
       - rail-data:/data
+      # 车站程序把 <交件号>.csv / <交件号>.ready 放进这个共享目录；
+      # 正式发布后平台在这里放出 <交件号>.ack.json 供车站核对清理。
+      # 生产环境可改成车站可写的挂载点，例如 /srv/rail-inbox:/inbox
+      - ./inbox:/inbox
     restart: unless-stopped
     stop_grace_period: 35s
     healthcheck:

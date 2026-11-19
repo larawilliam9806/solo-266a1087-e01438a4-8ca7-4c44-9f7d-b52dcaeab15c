@@ -16,6 +16,7 @@ from flask import (
 
 from . import convert, db, domain
 from .errors import AppError, NotFound, Unprocessable
+from .inbox import InboxStore
 from .publisher import Service
 from .storage import BlobStore, verify_publications
 
@@ -31,6 +32,7 @@ def create_app(config=None):
     app.config.update(
         MAX_CONTENT_LENGTH=convert.MAX_FILE_BYTES + 256 * 1024,
         DATA_DIR=os.environ.get("DATA_DIR", os.path.join(os.getcwd(), "data")),
+        INBOX_DIR=os.environ.get("INBOX_DIR", os.path.join(os.getcwd(), "inbox")),
         MAX_FILE_BYTES=convert.MAX_FILE_BYTES,
         JSON_AS_ASCII=False,
         SECRET_KEY=os.environ.get("SECRET_KEY", "rail-settlement-dev"),
@@ -42,8 +44,10 @@ def create_app(config=None):
     os.makedirs(data_dir, exist_ok=True)
     db_path = os.path.join(data_dir, "app.db")
     store = BlobStore(os.path.join(data_dir, "blobs"))
+    inbox = InboxStore(app.config["INBOX_DIR"])
     app.config["DB_PATH"] = db_path
     app.config["STORE"] = store
+    app.config["INBOX"] = inbox
 
     store.clean_tmp()
     bootstrap_conn = db.connect(db_path)
@@ -62,7 +66,7 @@ def create_app(config=None):
     def get_conn():
         return db.connect(db_path)
 
-    service = Service(get_conn, store)
+    service = Service(get_conn, store, inbox)
     app.extensions["service"] = service
     app.extensions["get_conn"] = get_conn
 
@@ -215,6 +219,13 @@ def create_app(config=None):
             conn.close()
         return render_template("upload.html", contracts=contracts, days=days)
 
+    @app.get("/inbox")
+    def inbox_page():
+        return render_template(
+            "inbox.html",
+            inbox_dir=app.config["INBOX"].root,
+        )
+
     @app.get("/days/<day>")
     def day_page(day):
         try:
@@ -262,6 +273,28 @@ def create_app(config=None):
     def api_confirm(preview_id):
         status, payload = service.confirm(preview_id)
         return jsonify(payload), status
+
+    # ------------------------------------------------------------------
+    # inbox （交件） API
+    # ------------------------------------------------------------------
+    @app.get("/api/intakes")
+    def api_intakes():
+        return jsonify(
+            {"intakes": service.list_intakes(), "inbox_dir": app.config["INBOX"].root}
+        )
+
+    @app.post("/api/inbox/scan")
+    def api_scan_inbox():
+        return jsonify(service.scan_inbox())
+
+    @app.post("/api/intakes/<intake_id>/previews")
+    def api_intake_preview(intake_id):
+        status, payload = service.preview_intake(intake_id)
+        return jsonify(payload), status
+
+    @app.post("/api/intakes/<intake_id>/ack")
+    def api_intake_ack(intake_id):
+        return jsonify(service.retry_ack(intake_id))
 
     @app.get("/api/days")
     def api_days():

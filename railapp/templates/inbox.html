@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}交件收件 · 日结发布台{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>交件收件</h1>
+  <p class="muted">
+    车站程序把日结流水写入共享目录 <code>{{ inbox_dir }}</code>：先写 <code>&lt;交件号&gt;.csv</code>，
+    再写 <code>&lt;交件号&gt;.ready</code>（内容为批次日期）。扫描时跳过还没有 <code>.ready</code> 的 CSV。
+    交件号一旦收件即绑定批次日期与原件；重扫沿用原交件，日期或内容有变会报冲突。
+    正式发布后才会在共享目录放出 <code>&lt;交件号&gt;.ack.json</code>（日期、原件 SHA-256、正式修订号），供车站核对后清理源文件。
+  </p>
+  <div class="form-actions">
+    <button id="scan-button" class="button">扫描共享目录</button>
+    <span id="scan-status" class="status" role="status"></span>
+  </div>
+  <div id="scan-summary" class="scan-summary" hidden></div>
+</section>
+
+<section class="panel">
+  <h2>交件列表</h2>
+  <div class="table-scroll">
+    <table class="grid" id="intake-table">
+      <thead>
+        <tr>
+          <th>交件号</th><th>批次日期</th><th>原件</th><th>状态</th>
+          <th>发布修订</th><th>回执</th><th>目录文件</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="preview-panel" hidden>
+  <h2>交件预览 <span id="preview-for" class="muted"></span></h2>
+  <div id="preview-summary" class="summary-grid"></div>
+  <div id="preview-downstreams" class="downstream-stack"></div>
+  <div class="form-actions publish-actions">
+    <button id="confirm-button" class="button primary">确认发布</button>
+    <button id="close-button" class="button ghost">关闭预览</button>
+    <span id="confirm-status" class="status" role="status"></span>
+  </div>
+</section>
+
+<template id="downstream-template">
+  <section class="panel downstream">
+    <header>
+      <h2><span class="ds-label"></span> <code class="ds-name"></code></h2>
+      <span class="badge ds-badge"></span>
+    </header>
+    <p class="ds-contract muted"></p>
+    <div class="ds-missing alert danger" hidden></div>
+    <h3>转换结果预览 <span class="muted ds-rowinfo"></span></h3>
+    <div class="table-scroll"><table class="grid preview-table"><thead></thead><tbody></tbody></table></div>
+    <p class="muted ds-note" hidden></p>
+    <div class="ds-issues" hidden>
+      <h3>不兼容的行列</h3>
+      <div class="table-scroll"><table class="grid issue-table">
+        <thead><tr><th>数据行</th><th>文件行号</th><th>列</th><th>值</th><th>原因</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="muted issue-note"></p>
+    </div>
+  </section>
+</template>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='preview-ui.js') }}"></script>
+<script src="{{ url_for('static', filename='inbox.js') }}"></script>
+{% endblock %}

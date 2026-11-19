@@ -55,14 +55,41 @@ CREATE TABLE IF NOT EXISTS previews (
     original_sha256        TEXT NOT NULL,
     result_json            TEXT NOT NULL,
     convertible            INTEGER NOT NULL,
+    intake_id              TEXT,
     created_at             TEXT NOT NULL,
     expires_at             TEXT NOT NULL,
     consumed_at            TEXT
 );
 
+-- 交件（共享目录收件）。交件号在收件时绑定批次日期与原件哈希；
+-- 状态机：received -> ack_pending -> published。
+CREATE TABLE IF NOT EXISTS intakes (
+    intake_id        TEXT PRIMARY KEY,
+    day              TEXT NOT NULL,
+    original_name    TEXT NOT NULL,
+    original_size    INTEGER NOT NULL,
+    original_sha256  TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    published_day    TEXT,
+    published_rev    INTEGER,
+    published_at     TEXT,
+    ack_written_at   TEXT,
+    conflict_kind    TEXT,
+    conflict_detail  TEXT,
+    conflict_seen_at TEXT,
+    received_at      TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_publications_day ON publications(day, rev);
 CREATE INDEX IF NOT EXISTS idx_previews_expiry ON previews(expires_at);
+CREATE INDEX IF NOT EXISTS idx_intakes_status ON intakes(status);
 """
+
+INTAKE_RECEIVED = "received"
+INTAKE_ACK_PENDING = "ack_pending"
+INTAKE_PUBLISHED = "published"
+INTAKE_STATUSES = (INTAKE_RECEIVED, INTAKE_ACK_PENDING, INTAKE_PUBLISHED)
 
 PREVIEW_TTL_SECONDS = 2 * 60 * 60
 
@@ -99,6 +126,7 @@ def transaction(conn, *, immediate=False):
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    _migrate(conn)
     now = iso(utcnow())
     for downstream in domain.DOWNSTREAM_ORDER:
         columns = domain.DEFAULT_CONTRACTS[downstream]
@@ -112,6 +140,15 @@ def init_db(conn):
                 now,
             ),
         )
+
+
+def _migrate(conn):
+    """Bring databases created by older versions up to date, in place."""
+    preview_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(previews)")
+    }
+    if "intake_id" not in preview_columns:
+        conn.execute("ALTER TABLE previews ADD COLUMN intake_id TEXT")
 
 
 def get_contract(conn, downstream):
@@ -185,15 +222,15 @@ def list_days(conn, limit=200):
 
 def create_preview(conn, *, preview_id, day, base_rev, contract_versions,
                    original_name, original_size, original_sha256, result,
-                   convertible):
+                   convertible, intake_id=None):
     now = utcnow()
     expires = now + timedelta(seconds=PREVIEW_TTL_SECONDS)
     conn.execute(
         """INSERT INTO previews (id, day, base_rev, settlement_version,
                                  ridership_version, original_name, original_size,
                                  original_sha256, result_json, convertible,
-                                 created_at, expires_at, consumed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                                 intake_id, created_at, expires_at, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
         (
             preview_id,
             day,
@@ -205,6 +242,7 @@ def create_preview(conn, *, preview_id, day, base_rev, contract_versions,
             original_sha256,
             json.dumps(result, ensure_ascii=False),
             1 if convertible else 0,
+            intake_id,
             iso(now),
             iso(expires),
         ),
@@ -234,6 +272,107 @@ def purge_expired_previews(conn, now=None):
     if ids:
         conn.executemany("DELETE FROM previews WHERE id = ?", [(i,) for i in ids])
     return ids
+
+
+# ----------------------------------------------------------------------
+# intakes （交件）
+# ----------------------------------------------------------------------
+def create_intake_if_absent(conn, *, intake_id, day, original_name,
+                            original_size, original_sha256):
+    """Insert a freshly received 交件； returns False if it already existed."""
+    now = iso(utcnow())
+    cursor = conn.execute(
+        """INSERT OR IGNORE INTO intakes
+           (intake_id, day, original_name, original_size, original_sha256,
+            status, received_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            intake_id,
+            day,
+            original_name,
+            original_size,
+            original_sha256,
+            INTAKE_RECEIVED,
+            now,
+            now,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+def get_intake(conn, intake_id):
+    row = conn.execute(
+        "SELECT * FROM intakes WHERE intake_id = ?", (intake_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_intakes(conn, status=None):
+    if status is not None:
+        rows = conn.execute(
+            "SELECT * FROM intakes WHERE status = ? ORDER BY received_at DESC, intake_id",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM intakes ORDER BY received_at DESC, intake_id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_intake_conflict(conn, intake_id, kind, detail):
+    conn.execute(
+        """UPDATE intakes
+           SET conflict_kind = ?, conflict_detail = ?, conflict_seen_at = ?,
+               updated_at = ?
+           WHERE intake_id = ?""",
+        (kind, detail, iso(utcnow()), iso(utcnow()), intake_id),
+    )
+
+
+def clear_intake_conflict(conn, intake_id):
+    conn.execute(
+        """UPDATE intakes
+           SET conflict_kind = NULL, conflict_detail = NULL,
+               conflict_seen_at = NULL, updated_at = ?
+           WHERE intake_id = ?""",
+        (iso(utcnow()), intake_id),
+    )
+
+
+def mark_intake_published(conn, intake_id, day, rev, published_at):
+    """Record the formal revision inside the publish transaction.
+
+    The status moves to ``ack_pending``: the publication is durable, but the
+    station has no receipt yet.  Only a successful ack-file write moves the
+    intake to ``published``.
+    """
+    cursor = conn.execute(
+        """UPDATE intakes
+           SET status = ?, published_day = ?, published_rev = ?,
+               published_at = ?, updated_at = ?
+           WHERE intake_id = ? AND status = ?""",
+        (
+            INTAKE_ACK_PENDING,
+            day,
+            rev,
+            published_at,
+            iso(utcnow()),
+            intake_id,
+            INTAKE_RECEIVED,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+def mark_ack_written(conn, intake_id):
+    conn.execute(
+        """UPDATE intakes
+           SET status = ?, ack_written_at = ?, updated_at = ?
+           WHERE intake_id = ? AND status = ?""",
+        (INTAKE_PUBLISHED, iso(utcnow()), iso(utcnow()), intake_id,
+         INTAKE_ACK_PENDING),
+    )
 
 
 def wait_for_write_lock(conn, attempts=200, delay=0.05):

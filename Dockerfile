@@ -3,6 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/data \
+    INBOX_DIR=/inbox \
     PORT=8000
 
 WORKDIR /app
@@ -13,8 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY railapp ./railapp
 COPY run.py ./
 
-RUN mkdir -p /data && useradd --system --uid 10001 --home /app rail \
-    && chown -R rail:rail /data /app
+RUN mkdir -p /data /inbox && useradd --system --uid 10001 --home /app rail \
+    && chown -R rail:rail /data /inbox /app
 USER rail
 
 EXPOSE 8000

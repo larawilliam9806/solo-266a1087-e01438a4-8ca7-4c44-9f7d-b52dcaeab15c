@@ -17,7 +17,11 @@ DEFAULT_CSV = (
 
 @pytest.fixture
 def app(tmp_path):
-    application = create_app({"DATA_DIR": str(tmp_path / "data"), "TESTING": True})
+    application = create_app({
+        "DATA_DIR": str(tmp_path / "data"),
+        "INBOX_DIR": str(tmp_path / "inbox"),
+        "TESTING": True,
+    })
     yield application
 
 
@@ -29,6 +33,11 @@ def client(app):
 @pytest.fixture
 def csv_bytes():
     return DEFAULT_CSV.encode("utf-8")
+
+
+@pytest.fixture
+def inbox_dir(app):
+    return app.config["INBOX"].root
 
 
 def upload(client, day="2026-11-01", data=None, filename="tickets.csv"):
@@ -52,3 +61,41 @@ def preview_and_confirm(client, day="2026-11-01", data=None):
         headers={"Accept": "application/json"},
     )
     return preview, confirmed
+
+
+def drop_inbox_file(inbox_dir, intake_id, csv_text=None, ready_day=None):
+    """Simulate the station program: write the CSV, then the .ready marker."""
+    if csv_text is not None:
+        with open(os.path.join(inbox_dir, intake_id + ".csv"), "wb") as handle:
+            handle.write(csv_text.encode("utf-8") if isinstance(csv_text, str) else csv_text)
+    if ready_day is not None:
+        with open(os.path.join(inbox_dir, intake_id + ".ready"), "w", encoding="utf-8") as handle:
+            handle.write(ready_day + "\n")
+
+
+def scan(client):
+    response = client.post("/api/inbox/scan", headers={"Accept": "application/json"})
+    assert response.status_code == 200, response.get_json()
+    return response.get_json()
+
+
+def receive(client, inbox_dir, intake_id, csv_text=None, ready_day="2026-11-01"):
+    """Drop a complete 交件 and scan it in; returns the scan summary."""
+    drop_inbox_file(inbox_dir, intake_id, csv_text if csv_text is not None else DEFAULT_CSV, ready_day)
+    result = scan(client)
+    assert intake_id in result["received"], result
+    return result
+
+
+def intake_preview(client, intake_id):
+    response = client.post(
+        f"/api/intakes/{intake_id}/previews", headers={"Accept": "application/json"}
+    )
+    assert response.status_code == 201, response.get_json()
+    return response.get_json()
+
+
+def confirm_preview(client, preview_id):
+    return client.post(
+        f"/api/previews/{preview_id}/confirm", headers={"Accept": "application/json"}
+    )
